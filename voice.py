@@ -49,12 +49,123 @@ class ActionContext:
     final_ai_intent: str = ""  # What the AI intended to do (not verbatim output)
 
 # --- CONFIGURATION ---
-# Indian English male voice - handles Hinglish better than pure Hindi voice
-# Avoids mispronunciation like "band" → "bend"
-EDGE_TTS_VOICE = "en-IN-PrabhatNeural"  # English (India) - Male, natural Hinglish
+# Female Hindi voice - natural sounding for Hindi
+# We convert Hinglish words to Devanagari before TTS for proper pronunciation
+EDGE_TTS_VOICE = "hi-IN-SwaraNeural"  # Hindi (India) - Female, natural
 
 # Shutdown keywords
 SHUTDOWN_KEYWORDS = ["exit", "stop listening", "goodbye", "quit", "stop"]
+
+
+# ============================================================
+# HINGLISH TO HINDI TRANSLITERATION
+# Converts Romanized Hindi to Devanagari for proper TTS pronunciation
+# ============================================================
+HINGLISH_TO_HINDI_MAP = {
+    # Common words that get mispronounced
+    "band": "बंद",
+    "bhai": "भाई",
+    "ho gaya": "हो गया",
+    "theek": "ठीक",
+    "theek hai": "ठीक है",
+    "dekh": "देख",
+    "dekho": "देखो",
+    "dekhlo": "देख लो",
+    "dekh raha": "देख रहा",
+    "haan": "हाँ",
+    "nahi": "नहीं",
+    "kya": "क्या",
+    "karo": "करो",
+    "kar": "कर",
+    "kar raha": "कर रहा",
+    "kar diya": "कर दिया",
+    "kar liya": "कर लिया",
+    "ruk": "रुक",
+    "ruko": "रुको",
+    "ek": "एक",
+    "do": "दो",
+    "teen": "तीन",
+    "chhoti": "छोटी",
+    "chhota": "छोटा",
+    "dikkat": "दिक्कत",
+    "aayi": "आई",
+    "aaya": "आया",
+    "gaya": "गया",
+    "gayi": "गई",
+    "hai": "है",
+    "hoon": "हूँ",
+    "mein": "में",
+    "maine": "मैंने",
+    "main": "मैं",
+    "tum": "तुम",
+    "tumne": "तुमने",
+    "aap": "आप",
+    "aapka": "आपका",
+    "aapki": "आपकी",
+    "samne": "सामने",
+    "samajh": "समझ",
+    "batata": "बताता",
+    "batao": "बताओ",
+    "bolo": "बोलो",
+    "bol": "बोल",
+    "suno": "सुनो",
+    "sun": "सुन",
+    "mila": "मिला",
+    "mili": "मिली",
+    "ready": "रेडी",
+    "file": "फ़ाइल",
+    "script": "स्क्रिप्ट",
+    "code": "कोड",
+    "error": "एरर",
+    "fix": "फिक्स",
+    "run": "रन",
+    "chala": "चला",
+    "chalo": "चलो",
+    "chalao": "चलाओ",
+    "chalaun": "चलाऊं",
+    "search": "सर्च",
+    "sab": "सब",
+    "bye": "बाय",
+    "bye bye": "बाय बाय",
+    "phir": "फिर",
+    "milenge": "मिलेंगे",
+    "abhi": "अभी",
+    "wait": "वेट",
+    "minute": "मिनट",
+    "second": "सेकंड",
+    "please": "प्लीज़",
+    "ji": "जी",
+    "haan ji": "हाँ जी",
+    "achha": "अच्छा",
+    "accha": "अच्छा",
+    "bahut": "बहुत",
+    "bohot": "बहुत",
+    "kaam": "काम",
+    "complete": "कम्प्लीट",
+    "done": "डन",
+    "success": "सक्सेस",
+    "limit": "लिमिट",
+    "cross": "क्रॉस",
+}
+
+def hinglish_to_hindi_for_tts(text: str) -> str:
+    """
+    Convert Hinglish (Romanized Hindi) to Devanagari for TTS.
+    This ensures proper pronunciation by Hindi TTS voice.
+    
+    Example: "Ho gaya bhai, band kar diya" → "हो गया भाई, बंद कर दिया"
+    """
+    result = text
+    
+    # Sort by length (longest first) to avoid partial replacements
+    sorted_phrases = sorted(HINGLISH_TO_HINDI_MAP.keys(), key=len, reverse=True)
+    
+    for hinglish, hindi in [(k, HINGLISH_TO_HINDI_MAP[k]) for k in sorted_phrases]:
+        # Case-insensitive word boundary replacement
+        pattern = r'\b' + re.escape(hinglish) + r'\b'
+        result = re.sub(pattern, hindi, result, flags=re.IGNORECASE)
+    
+    return result
 
 
 def clean_for_speech(text: str) -> str:
@@ -209,24 +320,35 @@ async def speak(text: str) -> None:
     Convert text to speech using Edge-TTS and play it.
     
     Args:
-        text: The text to speak
+        text: The text to speak (Hinglish)
+    
+    Process:
+        1. Log original Hinglish text (terminal stays clean)
+        2. Convert Hinglish → Hindi Devanagari for TTS
+        3. Send Hindi script to TTS for proper pronunciation
     """
     if not text or not text.strip():
         return
     
     # Truncate very long responses for speech
     if len(text) > 500:
-        text = text[:500] + "... I'll stop there for brevity."
-        
+        text = text[:500] + "... baaki phir bataunga."
+    
+    # Log the original Hinglish (terminal stays readable)
     logger.info(f"🔊 Speaking: {text[:50]}...")
+    
+    # Convert Hinglish to Hindi Devanagari for proper pronunciation
+    # Example: "Ho gaya bhai" → "हो गया भाई"
+    tts_text = hinglish_to_hindi_for_tts(text)
+    logger.debug(f"🔤 TTS text (Devanagari): {tts_text[:50]}...")
     
     try:
         # Create temporary file for audio
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
             temp_path = f.name
         
-        # Generate speech
-        communicate = edge_tts.Communicate(text, EDGE_TTS_VOICE)
+        # Generate speech using HINDI text for proper pronunciation
+        communicate = edge_tts.Communicate(tts_text, EDGE_TTS_VOICE)
         await communicate.save(temp_path)
         
         # Play audio using pygame

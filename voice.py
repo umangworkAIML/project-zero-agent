@@ -49,8 +49,9 @@ class ActionContext:
     final_ai_intent: str = ""  # What the AI intended to do (not verbatim output)
 
 # --- CONFIGURATION ---
-# Indian Hindi male voice - speaks Hindi naturally
-EDGE_TTS_VOICE = "hi-IN-MadhurNeural"  # Hindi (India) - Male, natural Hinglish
+# Indian English male voice - handles Hinglish better than pure Hindi voice
+# Avoids mispronunciation like "band" → "bend"
+EDGE_TTS_VOICE = "en-IN-PrabhatNeural"  # English (India) - Male, natural Hinglish
 
 # Shutdown keywords
 SHUTDOWN_KEYWORDS = ["exit", "stop listening", "goodbye", "quit", "stop"]

@@ -1,0 +1,24 @@
+# Project ZERO Dependencies
+# =========================
+
+# --- Core LangChain & LLM ---
+langchain-groq
+langchain-community
+langchain-core
+langgraph
+langgraph-checkpoint-sqlite
+python-dotenv
+
+# --- Web Search ---
+tavily-python
+
+# --- Vision Module (NEW) ---
+opencv-python
+google-generativeai
+Pillow
+
+# --- Voice Module ---
+SpeechRecognition
+PyAudio
+edge-tts
+pygame

@@ -1,6 +1,11 @@
 """
 Voice Module for Project ZERO
 Provides Speech-to-Text (Google Speech Recognition) and Text-to-Speech (Edge-TTS).
+
+Architecture:
+- LAYER 1: Internal Agent Processing (silent, debug-only)
+- LAYER 2: Spoken Response Generator (ActionContext → Hinglish)
+- LAYER 3: TTS Output (Edge-TTS)
 """
 
 import os
@@ -13,6 +18,7 @@ import queue
 import time
 import re
 from typing import Optional, Callable
+from dataclasses import dataclass, field
 
 import speech_recognition as sr
 import edge_tts
@@ -21,6 +27,26 @@ import pygame
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# ACTION CONTEXT: Structured data for spoken response generation
+# ============================================================
+@dataclass
+class ActionContext:
+    """
+    Structured context extracted from agent execution.
+    This is passed to the spoken response generator instead of raw text.
+    """
+    user_request: str
+    tools_executed: list = field(default_factory=list)
+    files_created: list = field(default_factory=list)
+    files_executed: list = field(default_factory=list)
+    execution_success: bool = True
+    error_summary: str = ""
+    search_performed: bool = False
+    vision_used: bool = False
+    final_ai_intent: str = ""  # What the AI intended to do (not verbatim output)
 
 # --- CONFIGURATION ---
 # Indian Hindi male voice - speaks Hindi naturally
@@ -238,29 +264,44 @@ class VoiceAssistant:
     3. TTS LAYER - Speak only the generated response
     """
     
-    # Prompt for generating spoken responses from internal context
-    SPOKEN_RESPONSE_PROMPT = """You are a voice response generator for an AI assistant.
-Your job is to convert INTERNAL SYSTEM OUTPUT into a NATURAL SPOKEN RESPONSE.
+    # ============================================================
+    # SPOKEN RESPONSE PROMPT: Converts ActionContext to Hinglish
+    # ============================================================
+    SPOKEN_RESPONSE_PROMPT = """Tu ek voice assistant hai. Tujhe sirf BOLNE WALA response generate karna hai.
 
-RULES:
-1. Speak in casual HINGLISH (Hindi + English mix)
-2. Sound like a friendly human assistant, like Jarvis
-3. NEVER read code, logs, file paths, or technical output
-4. Summarize what happened in 1-2 short sentences
-5. Be context-aware - mention what was done
-6. Offer helpful follow-ups naturally
-7. Use polite conversational language
+⚠️ STRICT RULES:
+1. SIRF Hinglish mein bolo (Hindi + English mix)
+2. Maximum 1-2 chhote sentences
+3. KABHI code, file paths, ya technical output mat bolo
+4. KABHI "INTERNAL_RESULT" ya logs verbatim mat padhna
+5. Natural, friendly, polite tone
+6. Context ke hisaab se bolo - kya kiya gaya
 
-EXAMPLES:
-- If code was written: "Ho gaya bhai, script likh di maine. Chalaun kya?"
-- If search was done: "Search kar liya. Jo main finding mili wo bata deta hoon..."
-- If error occurred: "Ek chhoti si dikkat aayi hai, fix kar raha hoon."
-- If task completed: "Sab ho gaya, dekhlo ek baar."
+📋 CONTEXT (do NOT read this aloud, just understand):
+- User ne kaha: {user_request}
+- Tools used: {tools_used}
+- Files created: {files_created}
+- Execution: {execution_status}
+- Vision used: {vision_used}
+- Search done: {search_done}
+- AI intent: {ai_intent}
 
-USER SAID: {user_input}
-INTERNAL RESULT: {internal_result}
+✅ GOOD RESPONSES (copy this style):
+- Code likha: "Ho gaya bhai, script ready hai. Chalaun kya?"
+- Code chala: "Run kar diya, sab theek chal gaya."
+- Error aaya: "Ek chhoti dikkat aayi, fix kar raha hoon."
+- Search kiya: "Search kar liya, batata hoon kya mila."
+- Vision dekha: "Haan dekh liya, samne [jo dikha wo]."
+- General: "Ho gaya, dekhlo ek baar."
 
-Generate ONLY the spoken response (1-2 sentences, Hinglish, friendly):"""
+❌ BAD RESPONSES (NEVER say these):
+- "The code has been executed successfully"
+- "File written to calculator.py"
+- "Tool execution completed"
+- Any English-only formal response
+- Reading code or technical output
+
+Generate ONLY the spoken response (1-2 sentences, Hinglish):"""
     
     def __init__(self, agent_app, agent_config: dict):
         """
@@ -311,18 +352,28 @@ Generate ONLY the spoken response (1-2 sentences, Hinglish, friendly):"""
         if self._listener:
             self._listener.resume()
     
-    def _generate_spoken_response(self, user_input: str, internal_result: str) -> str:
+    def _generate_spoken_response(self, context: ActionContext) -> str:
         """
-        LAYER 2: Generate a human-friendly spoken response from internal context.
-        This is the key architectural change - we don't speak internal output directly.
+        LAYER 2: Generate a human-friendly spoken response from ActionContext.
+        Uses structured context (NOT raw text) to generate natural Hinglish.
         """
         try:
             from langchain_core.messages import HumanMessage
             
-            # Create prompt with context
+            # Format context for prompt (structured, not raw)
+            tools_str = ", ".join(context.tools_executed) if context.tools_executed else "none"
+            files_created_str = ", ".join(context.files_created) if context.files_created else "none"
+            execution_status = "success" if context.execution_success else f"error: {context.error_summary[:50]}"
+            
+            # Create prompt with structured context
             prompt = self.SPOKEN_RESPONSE_PROMPT.format(
-                user_input=user_input,
-                internal_result=internal_result[:500]  # Truncate long results
+                user_request=context.user_request,
+                tools_used=tools_str,
+                files_created=files_created_str,
+                execution_status=execution_status,
+                vision_used="yes" if context.vision_used else "no",
+                search_done="yes" if context.search_performed else "no",
+                ai_intent=context.final_ai_intent[:100] if context.final_ai_intent else "task completed"
             )
             
             # Generate spoken response
@@ -332,24 +383,62 @@ Generate ONLY the spoken response (1-2 sentences, Hinglish, friendly):"""
             # Clean any remaining technical artifacts
             spoken = clean_for_speech(spoken)
             
+            # Validate: if still too technical, use fallback
+            if self._is_too_technical(spoken):
+                spoken = self._get_fallback_response(context)
+            
             logger.info(f"🗣️ Generated spoken response: {spoken[:50]}...")
             return spoken
             
         except Exception as e:
             logger.error(f"Speech generation error: {e}")
-            return "Ho gaya bhai, kaam complete hai."
+            return self._get_fallback_response(context)
+    
+    def _is_too_technical(self, text: str) -> bool:
+        """Check if response contains technical content that shouldn't be spoken."""
+        bad_patterns = [
+            r'```',  # Code blocks
+            r'\bdef\s+\w+\(',  # Function definitions
+            r'\bclass\s+\w+',  # Class definitions
+            r'\bimport\s+\w+',  # Import statements
+            r'\.(py|js|txt|json)\b',  # File extensions
+            r'[A-Z]:\\',  # Windows paths
+            r'/home/',  # Linux paths
+            r'error:|Error:|ERROR:',  # Error messages
+            r'successfully executed',  # Robotic phrases
+            r'execution complete',
+        ]
+        for pattern in bad_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                return True
+        return False
+    
+    def _get_fallback_response(self, context: ActionContext) -> str:
+        """Get a safe fallback response based on context."""
+        if context.vision_used:
+            return "Haan dekh liya, samne kya hai wo samajh gaya."
+        elif context.search_performed:
+            return "Search kar liya, jo mila wo batata hoon."
+        elif context.files_created:
+            return "Ho gaya bhai, file ready hai."
+        elif not context.execution_success:
+            return "Ek chhoti si dikkat aayi, dekh raha hoon."
+        else:
+            return "Ho gaya, sab theek hai."
         
-    def _process_with_agent(self, user_input: str) -> tuple[str, str]:
+    def _process_with_agent(self, user_input: str) -> tuple[ActionContext, str]:
         """
-        LAYER 1: Send input to agent and get INTERNAL response.
-        Returns tuple of (internal_result, tool_actions)
+        LAYER 1: Send input to agent and extract ActionContext.
+        Returns tuple of (ActionContext, raw_internal_for_debug)
         """
         from langchain_core.messages import HumanMessage
         
+        # Initialize context
+        context = ActionContext(user_request=user_input)
+        raw_internal = ""  # For terminal debugging only
+        
         try:
             input_message = HumanMessage(content=user_input)
-            internal_result = ""
-            tool_actions = []
             
             for event in self.agent_app.stream(
                 {"messages": [input_message]}, 
@@ -359,20 +448,58 @@ Generate ONLY the spoken response (1-2 sentences, Hinglish, friendly):"""
                     if key == "reasoner":
                         last_msg = value["messages"][-1]
                         if last_msg.content:
-                            internal_result = last_msg.content
+                            raw_internal = last_msg.content
+                            # Extract intent (first line, stripped of code)
+                            context.final_ai_intent = self._extract_intent(last_msg.content)
+                        
                         # Track tool calls
                         if hasattr(last_msg, 'tool_calls') and last_msg.tool_calls:
                             for tc in last_msg.tool_calls:
-                                tool_actions.append(tc.get('name', 'unknown'))
+                                tool_name = tc.get('name', 'unknown')
+                                context.tools_executed.append(tool_name)
+                                
+                                # Extract file info from tool args
+                                args = tc.get('args', {})
+                                if tool_name == 'write_file' and 'file_path' in args:
+                                    context.files_created.append(args['file_path'])
+                                elif tool_name == 'execute_python_file' and 'file_path' in args:
+                                    context.files_executed.append(args['file_path'])
+                                elif tool_name == 'analyze_view_tool':
+                                    context.vision_used = True
+                                elif tool_name == 'tavily_search_results_json':
+                                    context.search_performed = True
+                                    
                     elif key == "tools":
-                        # Log tool execution but don't expose it
-                        logger.debug(f"Tool executed: {value}")
+                        # Check tool output for errors
+                        last_msg = value["messages"][-1]
+                        if hasattr(last_msg, 'content'):
+                            tool_output = str(last_msg.content)
+                            if '❌' in tool_output or 'Error' in tool_output:
+                                context.execution_success = False
+                                context.error_summary = tool_output[:100]
+                            logger.debug(f"Tool output: {tool_output[:100]}")
                             
-            return internal_result, ", ".join(tool_actions) if tool_actions else "general response"
+            return context, raw_internal
             
         except Exception as e:
             logger.error(f"Agent error: {e}")
-            return f"Error: {str(e)}", "error"
+            context.execution_success = False
+            context.error_summary = str(e)
+            return context, f"Error: {str(e)}"
+    
+    def _extract_intent(self, raw_content: str) -> str:
+        """
+        Extract the AI's intent from raw content (first meaningful line).
+        Strips code blocks and technical content.
+        """
+        # Remove code blocks
+        cleaned = re.sub(r'```[\s\S]*?```', '', raw_content)
+        # Get first non-empty line
+        lines = [l.strip() for l in cleaned.split('\n') if l.strip()]
+        if lines:
+            # Take first line, max 100 chars
+            return lines[0][:100]
+        return "task completed"
             
     def run(self):
         """Main voice interaction loop."""
@@ -410,25 +537,27 @@ Generate ONLY the spoken response (1-2 sentences, Hinglish, friendly):"""
                     # ========================================
                     # LAYER 1: INTERNAL AGENT PROCESSING
                     # ========================================
-                    # This is silent - user doesn't hear this
-                    internal_result, tools_used = self._process_with_agent(user_text)
+                    # This is SILENT - user NEVER hears this
+                    context, raw_internal = self._process_with_agent(user_text)
                     
-                    # Terminal output (for developer debugging only)
-                    print(f"📋 [Internal]: {internal_result[:200]}..." if len(internal_result) > 200 else f"📋 [Internal]: {internal_result}")
-                    print(f"🔧 [Tools used]: {tools_used}")
+                    # Terminal output (for developer debugging ONLY)
+                    print(f"📋 [Internal - DEBUG ONLY]: {raw_internal[:200]}..." if len(raw_internal) > 200 else f"📋 [Internal - DEBUG ONLY]: {raw_internal}")
+                    print(f"🔧 [Tools]: {context.tools_executed}")
+                    print(f"📁 [Files created]: {context.files_created}")
+                    print(f"✅ [Success]: {context.execution_success}")
                     
                     # ========================================
                     # LAYER 2: GENERATE SPOKEN RESPONSE
                     # ========================================
-                    # Convert internal result to human-friendly Hinglish
-                    spoken_response = self._generate_spoken_response(user_text, internal_result)
+                    # Convert ActionContext (NOT raw text) to Hinglish
+                    spoken_response = self._generate_spoken_response(context)
                     
-                    print(f"\n🗣️ [Spoken]: {spoken_response}\n")
+                    print(f"\n🗣️ [Spoken - THIS GOES TO TTS]: {spoken_response}\n")
                     
                     # ========================================
                     # LAYER 3: TEXT-TO-SPEECH
                     # ========================================
-                    # Only the spoken response goes to TTS
+                    # ONLY the spoken response goes to TTS
                     speak_sync(spoken_response)
                     
                     # Resume listening after speech completes
